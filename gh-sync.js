@@ -14,7 +14,10 @@
   const token=()=>cfg().token||'';
   /* mark local edits as unsynced whenever the app writes muse.data (after boot) */
   let booted=false;const origSet=Storage.prototype.setItem;
-  Storage.prototype.setItem=function(k,v){origSet.call(this,k,v);if(booted&&this===window.localStorage&&k==='muse.data'){origSet.call(this,LS.dirty,'1');status();}};
+  const fp=v=>{v=String(v||'').replace(/"activeBoard":"[^"]*",?/,'');let h=2166136261;for(let i=0;i<v.length;i++){h^=v.charCodeAt(i);h=Math.imul(h,16777619);}return (h>>>0).toString(36)+':'+v.length};
+  let baseFp=null; /* fingerprint of the board as last loaded/saved; switching boards alone is not an edit */
+  Storage.prototype.setItem=function(k,v){origSet.call(this,k,v);if(booted&&this===window.localStorage&&k==='muse.v2'){origSet.call(this,LS.dirty,'1');status();}
+    if(booted&&this===window.localStorage&&k==='muse.data'&&baseFp!==null){const d=fp(v)!==baseFp;if(d)origSet.call(this,LS.dirty,'1');else this.removeItem(LS.dirty);status();}};
   const b64enc=s=>{const b=new TextEncoder().encode(s);let o='';for(let i=0;i<b.length;i+=0x8000)o+=String.fromCharCode.apply(null,b.subarray(i,i+0x8000));return btoa(o)};
   const b64dec=s=>new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\s/g,'')),c=>c.charCodeAt(0)));
   const hdr=()=>({'Authorization':'Bearer '+token(),'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'});
@@ -31,6 +34,7 @@
     if(!j||j.app!=='muse'||!j.state||!Array.isArray(j.state.cards))throw Error('board.json is not a Muse board');
     origSet.call(localStorage,'muse.data',JSON.stringify(j.state));
     if(j.prefs){let s={};try{s=JSON.parse(get('muse.settings')||'{}')}catch{}const p={...j.prefs};delete p.apiKey;delete p.ytKey;origSet.call(localStorage,'muse.settings',JSON.stringify({...s,...p}));}
+    {let v={};try{v=JSON.parse(get('muse.v2')||'{}')}catch{}let any=false;for(const k of ['tracker','inspo','planner','incidents','ideaWorkshop'])if(j[k]!==undefined){v[k]=j[k];any=true;}if(any)origSet.call(localStorage,'muse.v2',JSON.stringify(v));}
     if(j.drafts&&Object.keys(j.drafts).length)origSet.call(localStorage,'muse.disk.drafts',JSON.stringify(j.drafts));
     set(LS.at,j.exportedAt||'');set(LS.dirty,null);
   }
@@ -58,7 +62,8 @@
     let prefs={};try{prefs=typeof prefsForBackup==='function'?prefsForBackup():{}}catch{}
     prefs={...prefs};delete prefs.apiKey;delete prefs.ytKey;
     let drafts={};try{drafts=JSON.parse(get('muse.disk.drafts')||'{}')}catch{}
-    return {app:'muse',version:1,exportedAt:new Date().toISOString(),state:st,prefs,drafts};
+    let v2={};try{v2=JSON.parse(get('muse.v2')||'{}')}catch{}
+    const out={app:'muse',version:1,exportedAt:new Date().toISOString(),state:st,prefs,drafts};for(const k of ['tracker','inspo','planner','incidents','ideaWorkshop'])if(v2[k]!==undefined)out[k]=v2[k];return out;
   }
   let busy=false;
   window.museSaveToGitHub=async function(force){
@@ -75,7 +80,7 @@
         r=await put(remote.sha);
       }
       if(!r.ok){const e=await r.json().catch(()=>({}));throw Error('GitHub '+r.status+' '+(e.message||''));}
-      const j=await r.json();set(LS.sha,j.content.sha);set(LS.at,p.exportedAt);set(LS.dirty,null);
+      const j=await r.json();set(LS.sha,j.content.sha);set(LS.at,p.exportedAt);set(LS.dirty,null);baseFp=fp(get('muse.data'));
       say('Saved to GitHub ✓');
     }catch(e){say('⚠ '+e.message);console.warn(e);}
     finally{busy=false;status();}
@@ -86,51 +91,140 @@
     try{const {json,sha}=await fetchRemote();if(!json)return say('No board on GitHub yet');adopt(json);set(LS.sha,sha);location.reload();}catch(e){say('⚠ '+e.message);}
   };
   function say(m){if(typeof toast==='function')toast(m);else console.log(m);status();}
-  function status(m){const el=document.getElementById('ghStatus');if(!el)return;el.textContent=m||(!token()?'GitHub sync off · edits saved on this device':get(LS.dirty)==='1'?'● Unsaved to GitHub':'✓ In sync with GitHub');const b=document.getElementById('ghSaveBtn');if(b)b.classList.toggle('gh-dirty',get(LS.dirty)==='1');}
-  function openPanel(){document.getElementById('ghPanel')?.showModal?.();}
+  function status(m){
+    const el=document.getElementById('ghStatus');if(!el)return;const dirty=get(LS.dirty)==='1';
+    const narrow=matchMedia('(max-width:800px)').matches;el.textContent=m&&!narrow?m:(!token()?(narrow?'Local only':'Not syncing · saved on this device only'):dirty?(narrow?'Unsaved':'Unsaved changes'):(narrow?'Saved':'All changes saved'));if(m)el.title=m;
+    el.dataset.state=!token()?'off':dirty?'dirty':'ok';
+    const b=document.getElementById('ghSaveBtn');if(b){b.classList.toggle('gh-dirty',dirty);b.setAttribute('aria-label',dirty?'Save to GitHub — unsaved changes':'Save to GitHub');}
+  }
+  function openPanel(){const d=document.getElementById('ghPanel');if(d&&!d.open){d._ret=document.activeElement;d.showModal();}}
+  /* ---------- accessibility + UX layer (no data/schema changes) ---------- */
+  const rgb=s=>{const m=String(s).match(/rgba?\(([^)]+)\)/);if(!m)return null;const p=m[1].split(/[ ,\/]+/).filter(Boolean).map(Number);return [p[0],p[1],p[2],p[3]==null?1:p[3]];};
+  const lum=c=>{const f=v=>{v/=255;return v<=0.03928?v/12.92:Math.pow((v+0.055)/1.055,2.4)};return 0.2126*f(c[0])+0.7152*f(c[1])+0.0722*f(c[2]);};
+  const ratio=(a,b)=>{const x=lum(a),y=lum(b);return (Math.max(x,y)+0.05)/(Math.min(x,y)+0.05);};
+  function a11yFix(root){
+    root=root||document;
+    root.querySelectorAll('img').forEach(i=>{if(i.hasAttribute('alt')&&!i.alt.trim())i.alt='';if(!i.hasAttribute('alt'))i.alt='';});
+    root.querySelectorAll('a[href]').forEach(a=>{if(a.hasAttribute('aria-label')||a.textContent.trim())return;const img=a.querySelector('img[alt]:not([alt=""])');if(img)return;let h='';try{h=new URL(a.href).hostname.replace(/^www\./,'')}catch{}a.setAttribute('aria-label','Open link'+(h?' on '+h:''));});
+    root.querySelectorAll('iframe:not([title])').forEach(f=>f.title='Embedded post');
+    root.querySelectorAll('button').forEach(b=>{if(b.hasAttribute('aria-label')||b.textContent.trim()&&!/^[\W\d_]{1,3}$/u.test(b.textContent.trim()))return;const t=b.title||{'✕':'Close','×':'Close','⋯':'More options','↺':'Clear','⚙':'Settings','←':'Move left','→':'Move right'}[b.textContent.trim()];if(t)b.setAttribute('aria-label',t);});
+    root.querySelectorAll('select[title]:not([aria-label])').forEach(x=>x.setAttribute('aria-label',x.title));
+    root.querySelectorAll('input:not([type=hidden]):not([aria-label]),textarea:not([aria-label]),select:not([aria-label])').forEach(x=>{if(x.labels&&x.labels.length)return;const t=x.title||x.placeholder;if(t)x.setAttribute('aria-label',t.replace(/…$/,''));});
+    root.querySelectorAll('header.voice-head,dialog header,section header,article header').forEach(h=>{if(!h.hasAttribute('role'))h.setAttribute('role','group');});
+    /* user-chosen label/stage colours: darken text until it meets 4.5:1 on its background */
+    root.querySelectorAll('[style*="color"]').forEach(el=>{if(!el.textContent.trim()||el.dataset.cfix)return;el.dataset.cfix='1';const cs=getComputedStyle(el);const fg=rgb(cs.color);if(!fg)return;let n=el,bg=null;while(n&&n.nodeType===1){const b=rgb(getComputedStyle(n).backgroundColor);if(b&&b[3]>0.9){bg=b;break;}n=n.parentElement;}bg=bg||[255,255,255,1];
+      if(lum(bg)<0.4)return;let c=fg.slice(0,3),i=0;while(ratio(c,bg)<4.5&&i++<20)c=c.map(v=>Math.round(v*0.88));if(i)el.style.color='rgb('+c.join(',')+')';});
+    const vp=document.getElementById('voicePreview');if(vp&&!vp.hasAttribute('tabindex'))vp.tabIndex=0;
+    const sm=document.querySelector('#workspaceTools>summary');if(sm&&sm.getAttribute('aria-label')&&!sm.getAttribute('aria-label').startsWith(sm.textContent.trim()))sm.setAttribute('aria-label',sm.textContent.trim()+': Plan, Published and settings');
+  }
+  const MODAL_SEL='[id$="Modal"].open,.modal.open,.os-workspace.open,#menuPop.open';
+  function topModal(){const all=[...document.querySelectorAll(MODAL_SEL)].filter(e=>e.offsetParent!==null||getComputedStyle(e).position==='fixed');return all[all.length-1]||null;}
+  function closeEl(m){
+    const btn=[...m.querySelectorAll('button,[data-os-action="close"]')].find(b=>b.offsetParent!==null&&(/^(✕|×|close|cancel|done|back to workspace|close dialog)$/i.test((b.getAttribute('aria-label')||b.textContent).trim())||b.dataset.osAction==='close'));
+    if(btn)btn.click();else m.classList.remove('open');
+  }
+  const FOCUSABLE='a[href],button:not([disabled]),input:not([disabled]):not([type=hidden]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"]),summary';
+  document.addEventListener('keydown',e=>{
+    if(e.key==='Escape'&&!document.querySelector('dialog[open]')){
+      const cap=document.getElementById('capture');if(document.body.classList.contains('gh-capturing')&&cap&&cap.contains(document.activeElement)){document.body.classList.remove('gh-capturing');document.getElementById('ghFab')?.focus();return;}
+      const ae=document.activeElement;if(ae&&/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)||ae?.isContentEditable){if(topModal()?.classList.contains('os-workspace')){ae.blur();return;}}
+      const m=topModal();if(m){e.preventDefault();closeEl(m);}
+    }
+    if(e.key==='Tab'){const m=document.querySelector('dialog[open]')||topModal();if(!m||m.id==='menuPop')return;const f=[...m.querySelectorAll(FOCUSABLE)].filter(x=>x.offsetParent!==null);if(!f.length)return;
+      if(!m.contains(document.activeElement)){e.preventDefault();f[0].focus();return;}
+      if(e.shiftKey&&document.activeElement===f[0]){e.preventDefault();f[f.length-1].focus();}else if(!e.shiftKey&&document.activeElement===f[f.length-1]){e.preventDefault();f[0].focus();}}
+  },true);
   function ui(){
-    const css=document.createElement('style');css.textContent=`
-#ghBar{position:fixed;right:12px;top:10px;z-index:9000;display:flex;gap:6px;align-items:center;font:12px system-ui;pointer-events:none}#ghBar>*{pointer-events:auto}
-#ghBar button{min-height:40px;padding:0 12px;border-radius:20px;border:1px solid #cfd4dc;background:#fff;cursor:pointer;font:600 13px system-ui}
-#ghBar .gh-dirty{background:#2f5d50;color:#fff;border-color:#2f5d50}
-#ghStatus{background:#fffd;padding:3px 8px;border-radius:10px;color:#555}
-#ghPanel{max-width:min(520px,94vw);border:1px solid #ccc;border-radius:12px;padding:18px;font:14px/1.5 system-ui}
-#ghPanel input{width:100%;box-sizing:border-box;min-height:44px;font-size:16px;margin:4px 0 10px}
-#ghPanel .row{display:flex;gap:8px;flex-wrap:wrap}#ghPanel .row button{min-height:44px;padding:0 14px}
-#ghFab{display:none}
-@media(max-width:600px){
- #ghBar{top:auto;bottom:calc(12px + env(safe-area-inset-bottom));left:10px;right:10px;justify-content:flex-end}#ghFab{order:-1;margin-right:auto}
- #ghStatus{display:none}
- #ghFab{display:block;width:56px;height:56px!important;border-radius:50%!important;font-size:28px!important;background:#2f5d50!important;color:#fff!important;border:none!important;box-shadow:0 4px 14px #0003}
- #capture{bottom:calc(84px + env(safe-area-inset-bottom))!important}
- button,.tbtn,.cbtn,select,.board-item,.zone-tab{min-height:40px}
- input,textarea,select{font-size:16px!important} /* stops iOS zoom-on-focus */
+    const css=document.createElement('style');css.id='museUxCss';css.textContent=`
+:root{--gh-green:#2f5d50}
+.sr-only{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+:focus-visible{outline:3px solid #2f5d50!important;outline-offset:2px!important;border-radius:4px}
+#skipLink{position:fixed;left:8px;top:-60px;z-index:10001;background:#1f2320;color:#fff;padding:10px 14px;border-radius:6px;font:600 14px system-ui}#skipLink:focus{top:8px}
+.utility-label{color:#4f5a6b!important}
+/* sync bar: bottom-right pill on desktop, clear of the top toolbar */
+#ghBar{display:flex;gap:6px;align-items:center;font:13px/1.2 system-ui,sans-serif;flex-shrink:0}#workspaceStorageNote{display:none!important}
+#ghBar button,#ghBar span{white-space:nowrap}
+#ghBar button{min-height:40px;min-width:40px;padding:0 12px;border-radius:6px;border:1px solid #c4cad4;background:#fff;color:#1f2320;cursor:pointer;font:600 14px system-ui,sans-serif;display:inline-flex;align-items:center;gap:6px}
+#ghBar button:hover{background:#f1f3f6}
+#ghSaveBtn.gh-dirty{background:var(--gh-green);color:#fff;border-color:var(--gh-green)}#ghSaveBtn.gh-dirty:hover{background:#244a40}
+#ghStatus{padding:0 6px 0 10px;color:#3d4554;display:flex;align-items:center;gap:6px;white-space:nowrap}
+#ghStatus::before{content:"";width:8px;height:8px;border-radius:50%;background:#8a94a6}
+#ghStatus[data-state=ok]::before{background:#2f8a5f}#ghStatus[data-state=dirty]::before{background:#c26a12}
+#ghBar #ghFab{display:none}
+#ghPanel{width:min(520px,94vw);box-sizing:border-box;border:none;border-radius:14px;padding:22px;font:15px/1.5 system-ui,sans-serif;color:#1f2320;box-shadow:0 20px 60px #0004}
+#ghPanel::backdrop{background:#1f232066}
+#ghPanel h2{margin:0 0 6px;font:600 20px/1.3 system-ui,sans-serif}
+#ghPanel p{margin:0 0 14px;color:#3d4554}
+#ghPanel label{display:block;font-weight:600;font-size:14px;margin-top:10px}
+#ghPanel input{display:block;width:100%;box-sizing:border-box;min-height:44px;font-size:16px;margin:6px 0 2px;padding:8px 12px;border:1px solid #9aa3b2;border-radius:8px}
+#ghPanel .hint{font-weight:400;color:#4f5a6b;font-size:13px}
+#ghPanel .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:18px}
+#ghPanel .row button{min-height:44px;padding:0 16px;border-radius:8px;border:1px solid #9aa3b2;background:#fff;color:#1f2320;font:600 14px system-ui,sans-serif;cursor:pointer}
+#ghPanel .row .primary{background:var(--gh-green);border-color:var(--gh-green);color:#fff}
+#ghPanel .row .danger{color:#a2321f;border-color:#d9a69c}
+#ghPanel .row .spacer{flex:1}
+#ghPanel .x{position:absolute;right:10px;top:10px;min-width:44px;min-height:44px;border:none;background:none;font-size:22px;cursor:pointer;color:#3d4554}
+#boardScroll{padding-bottom:220px}
+@media(max-width:800px){
+ #ghBar{position:fixed;z-index:300;background:#fff;gap:8px;left:0;right:0;bottom:0;border-radius:0;border:none;border-top:1px solid #d5dae2;padding:8px 12px calc(8px + env(safe-area-inset-bottom));justify-content:flex-end;box-shadow:0 -4px 16px #24375a14}
+ #ghStatus{margin-right:auto;font-size:12px;padding-left:2px}
+ #ghBar button{min-height:44px;min-width:44px;border-radius:22px}
+ #ghBar #ghFab{display:inline-flex;order:-2;background:var(--gh-green)!important;color:#fff!important;border-color:var(--gh-green)!important;font-size:15px!important}
+ #ghFab~#ghStatus{margin-right:auto}
+ body{padding-bottom:calc(64px + env(safe-area-inset-bottom))}
+ #toast{bottom:calc(80px + env(safe-area-inset-bottom))!important;max-width:92vw;text-align:center}
+ /* capture sheet only when asked for, so it doesn't cover the cards */
+ #capture{bottom:calc(68px + env(safe-area-inset-bottom))!important;left:8px!important;right:8px!important;width:auto!important;transform:none!important;box-shadow:0 -6px 24px #24375a33}
+ body:not(.gh-capturing) #capture{display:none!important}
+ .muse-idea-editor .muse-editor-actions{bottom:calc(60px + env(safe-area-inset-bottom))!important}
+ /* single scrolling row of workspaces instead of three wrapped rows */
+ #workspaceNav{flex-wrap:nowrap!important;overflow-x:auto;width:100%!important;scrollbar-width:none;-webkit-overflow-scrolling:touch;padding-bottom:2px}
+ #workspaceNav::-webkit-scrollbar{display:none}
+ #workspaceNav button{flex:0 0 auto;white-space:nowrap}
+ button,.tbtn,.cbtn,select,summary,.board-item,.zone-tab,#workspaceNav button{min-height:44px}
+ .card a,.card button,.os-actions button{min-height:44px;display:inline-flex;align-items:center}.card .actions button{min-width:44px;justify-content:center}
+ input,textarea,select{font-size:16px!important}
  #editModal .mbox,#itemModal .mbox{width:100vw!important;max-width:100vw!important;height:100dvh!important;max-height:100dvh!important;border-radius:0!important}
- .card .actions button{min-width:40px;min-height:40px}
  #topbar{flex-wrap:wrap}
-}`;document.head.append(css);
-    const bar=document.createElement('div');bar.id='ghBar';
-    bar.innerHTML='<span id="ghStatus" role="status"></span><button id="ghSaveBtn" title="Commit data/board.json to GitHub">☁ Save to GitHub</button><button id="ghCfgBtn" title="GitHub sync settings" aria-label="GitHub sync settings">⚙</button><button id="ghFab" aria-label="Add idea">＋</button>';
-    document.body.append(bar);
-    const d=document.createElement('dialog');d.id='ghPanel';
-    d.innerHTML='<h3 style="margin-top:0">GitHub sync</h3><p>Fine-grained token with <b>Contents: Read and write</b> on <b>'+OWNER+'/'+REPO+'</b> only. Stored only in this browser (localStorage), never committed.</p><label>GitHub token<input id="ghTok" type="password" autocomplete="off" placeholder="github_pat_…"></label><label>Anthropic API key (optional, for Claude features)<input id="ghAnth" type="password" autocomplete="off" placeholder="sk-ant-…"></label><label>YouTube Data API key (optional)<input id="ghYt" type="password" autocomplete="off" placeholder="AIza…"></label><div class="row"><button id="ghSaveCfg">Save settings</button><button id="ghLoad">Load from GitHub</button><button id="ghForget">Forget token</button><button id="ghClose">Close</button></div>';
+}
+@media(prefers-reduced-motion:reduce){#ghBar *,#ghPanel{transition:none!important;animation:none!important}}`;document.head.append(css);
+    /* landmarks + headings */
+    const skip=document.createElement('a');skip.id='skipLink';skip.href='#main';skip.textContent='Skip to content';document.body.prepend(skip);
+    const main=document.getElementById('main')||document.querySelector('main');if(main){if(!main.id)main.id='main';main.tabIndex=-1;}
+    if(!document.querySelector('h1.sr-only')){const h=document.createElement('h1');h.className='sr-only';h.textContent='Muse idea board';(main||document.body).prepend(h);}
+    const sb=document.getElementById('sidebar');if(sb&&!sb.getAttribute('aria-label'))sb.setAttribute('aria-label','Workspaces');
+    const t=document.getElementById('toast');if(t){t.setAttribute('role','status');t.setAttribute('aria-live','polite');}
+    const bt=document.getElementById('boardTitle');if(bt)bt.setAttribute('aria-label','Board name');
+    const ss=document.getElementById('sortSel');if(ss)ss.setAttribute('aria-label','Sort this board');
+    const bar=document.createElement('div');bar.id='ghBar';bar.setAttribute('role','region');bar.setAttribute('aria-label','Sync');
+    bar.innerHTML='<button id="ghFab" type="button">＋ <span>Add idea</span></button><span id="ghStatus" role="status" aria-live="polite"></span><button id="ghSaveBtn" type="button" title="Commit your board to your private GitHub repo">☁ <span>Save to GitHub</span></button><button id="ghCfgBtn" type="button" title="Sync & API key settings" aria-label="Sync settings">⚙</button>';
+    const place=()=>{const narrow=matchMedia('(max-width:800px)').matches,tb=document.getElementById('topbar'),note=document.getElementById('workspaceStorageNote');
+      const sbx=document.getElementById('sidebar');if(!narrow&&tb){if(bar.parentElement!==tb)tb.insertBefore(bar,note&&note.parentElement===tb?note:null);}else if(narrow&&sbx&&document.body.classList.contains('v2-on')){if(bar.parentElement!==sbx)sbx.insertBefore(bar,document.getElementById('v2More'));}else if(bar.parentElement!==document.body)document.body.append(bar);status();};window.museGhPlace=place;
+    document.body.append(bar);place();matchMedia('(max-width:800px)').addEventListener('change',place);
+    const d=document.createElement('dialog');d.id='ghPanel';d.setAttribute('aria-labelledby','ghPanelTitle');
+    d.innerHTML='<button class="x" type="button" id="ghX" aria-label="Close">✕</button><h2 id="ghPanelTitle">Sync & keys</h2><p>Your ideas live in your private repo <b>'+OWNER+'/'+REPO+'</b>. Keys are stored only in this browser and never committed.</p><label for="ghTok">GitHub token <span class="hint">· fine-grained, Contents: Read and write on '+OWNER+'/'+REPO+'</span></label><input id="ghTok" type="password" autocomplete="off" placeholder="github_pat_…"><label for="ghAnth">Anthropic API key <span class="hint">· optional, for Claude features</span></label><input id="ghAnth" type="password" autocomplete="off" placeholder="sk-ant-…"><label for="ghYt">YouTube Data API key <span class="hint">· optional, for view counts</span></label><input id="ghYt" type="password" autocomplete="off" placeholder="AIza…"><div class="row"><button id="ghSaveCfg" class="primary" type="button">Save</button><button id="ghLoad" type="button">Reload from GitHub</button><span class="spacer"></span><button id="ghForget" class="danger" type="button">Remove token</button></div>';
     document.body.append(d);
     const S=()=>{try{return JSON.parse(get('muse.settings')||'{}')}catch{return {}}};
-    d.addEventListener('close',()=>status());
-    document.getElementById('ghCfgBtn').onclick=()=>{const s=typeof settings!=='undefined'?settings:S();ghTok.value=token();ghAnth.value=s.apiKey||'';ghYt.value=s.ytKey||'';d.showModal();};
-    document.getElementById('ghClose').onclick=()=>d.close();
-    document.getElementById('ghForget').onclick=()=>{set(LS.cfg,null);ghTok.value='';say('Token removed from this browser');};
+    d.addEventListener('close',()=>{status();try{d._ret?.focus?.()}catch{}});
+    document.getElementById('ghCfgBtn').onclick=()=>{const s=typeof settings!=='undefined'?settings:S();ghTok.value=token();ghAnth.value=s.apiKey||'';ghYt.value=s.ytKey||'';openPanel();};
+    document.getElementById('ghX').onclick=()=>d.close();
+    document.getElementById('ghForget').onclick=()=>{if(!confirm('Remove the GitHub token from this browser? Your ideas stay on GitHub.'))return;set(LS.cfg,null);ghTok.value='';say('Token removed from this browser');};
     document.getElementById('ghLoad').onclick=()=>window.museLoadFromGitHub();
     document.getElementById('ghSaveCfg').onclick=async()=>{
       set(LS.cfg,JSON.stringify({token:ghTok.value.trim()}));
       if(typeof settings!=='undefined'){settings.apiKey=ghAnth.value.trim();settings.ytKey=ghYt.value.trim();if(typeof saveSettings==='function')saveSettings();const a=document.getElementById('apiKey');if(a)a.value=settings.apiKey;const y=document.getElementById('ytKey');if(y)y.value=settings.ytKey;}
-      if(token()){try{const {sha}=await fetchRemote();if(sha&&!get(LS.sha))set(LS.sha,sha);say('GitHub connected ✓ · loading…');d.close();return window.museBootRemote();}catch(e){say('⚠ '+e.message);}}
+      if(token()){try{const {sha}=await fetchRemote();if(sha&&!get(LS.sha))set(LS.sha,sha);say('GitHub connected ✓ · loading…');d.close();return window.museBootRemote();}catch(e){say('⚠ '+e.message);return;}}
       d.close();
     };
     document.getElementById('ghSaveBtn').onclick=()=>window.museSaveToGitHub();
-    document.getElementById('ghFab').onclick=()=>{if(typeof museBeginCapture==='function')return museBeginCapture();const i=document.getElementById('captureInput');if(i){i.scrollIntoView({block:'end'});i.focus();}};
+    const fab=document.getElementById('ghFab');
+    fab.onclick=()=>{document.body.classList.add('gh-capturing');if(typeof museBeginCapture==='function')museBeginCapture();setTimeout(()=>{const i=document.getElementById('captureInput');if(i){i.focus();}},50);};
+    /* hide the mobile capture sheet again once it's empty and focus leaves it */
+    document.addEventListener('focusout',()=>setTimeout(()=>{const c=document.getElementById('capture'),i=document.getElementById('captureInput');if(c&&!c.contains(document.activeElement)&&!(i&&i.value.trim()))document.body.classList.remove('gh-capturing');},150));
+    baseFp=get(LS.dirty)==='1'?'':fp(get('muse.data'));
+    a11yFix();let q=null;new MutationObserver(()=>{if(q)return;q=requestAnimationFrame(()=>{q=null;a11yFix();});}).observe(document.body,{childList:true,subtree:true});
     status();
-    if(!token()){const n=document.createElement('p');n.id='ghSetup';n.style.cssText='background:#fff7e6;border:1px solid #e8c36a;border-radius:8px;padding:10px;margin:0 0 10px';n.innerHTML='<b>Set up sync:</b> paste your GitHub token below to load your ideas from your private repo. Until then this device shows only what’s stored in this browser.';d.querySelector('h3').after(n);ghTok.value='';d.showModal();say('Tap ⚙ and paste your GitHub token to load your ideas');}
+    if(!token()){const n=document.createElement('p');n.id='ghSetup';n.style.cssText='background:#fff4dc;border:1px solid #c99a2e;border-radius:8px;padding:10px 12px;color:#3d2e05';n.innerHTML='<b>Connect your ideas:</b> paste your GitHub token below. Until then this device only shows what’s stored in this browser.';d.querySelector('h2').after(n);ghTok.value='';openPanel();say('Paste your GitHub token in Sync settings to load your ideas');}
     window.addEventListener('beforeunload',e=>{if(token()&&get(LS.dirty)==='1'){e.preventDefault();e.returnValue='';}});
   }
   window.museGhUI=ui;

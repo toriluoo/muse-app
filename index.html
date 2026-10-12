@@ -1508,6 +1508,7 @@ button:disabled{cursor:not-allowed}
 <div id="toast"></div>
 
 <script src="gh-sync.js"></script>
+<script src="muse-v2.js"></script>
 <script src="snapshots/muse-context.js"></script>
 <script src="snapshots/published/manifest.js"></script>
 <script src="snapshots/x-local.js"></script>
@@ -5887,6 +5888,7 @@ const museTimelineLabels=renderTracker;renderTracker=function(){museTimelineLabe
   renderAll();
   renderChat();
   try { museGhUI(); museBootRemote(); } catch (e) { console.warn(e); }
+  try { museV2Init(); museGhPlace && museGhPlace(); } catch (e) { console.error('Muse v2 shell failed', e); }
   if (matchMedia("(min-width:601px)").matches) capInput.focus();
   restoreSyncHandle(); /* reattach the live folder from last session */
   /* if the save couldn't be read, say so loudly instead of showing a deceptively empty board */
