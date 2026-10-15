@@ -11,7 +11,8 @@
   const get=k=>{try{return localStorage.getItem(k)}catch{return null}};
   const set=(k,v)=>{try{v==null?localStorage.removeItem(k):localStorage.setItem(k,v)}catch{}};
   const cfg=()=>{try{return JSON.parse(get(LS.cfg)||'{}')}catch{return {}}};
-  const token=()=>cfg().token||'';
+  const cleanTok=t=>String(t||'').replace(/^\s*(bearer|token)\s+/i,'').replace(/[\s"'<>]/g,'');
+  const token=()=>cleanTok(cfg().token);
   /* mark local edits as unsynced whenever the app writes muse.data (after boot) */
   let booted=false;const origSet=Storage.prototype.setItem;
   const fp=v=>{v=String(v||'').replace(/"activeBoard":"[^"]*",?/,'');let h=2166136261;for(let i=0;i<v.length;i++){h^=v.charCodeAt(i);h=Math.imul(h,16777619);}return (h>>>0).toString(36)+':'+v.length};
@@ -21,18 +22,24 @@
   const b64enc=s=>{const b=new TextEncoder().encode(s);let o='';for(let i=0;i<b.length;i+=0x8000)o+=String.fromCharCode.apply(null,b.subarray(i,i+0x8000));return btoa(o)};
   const b64dec=s=>new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\s/g,'')),c=>c.charCodeAt(0)));
   const hdr=()=>({'Authorization':'Bearer '+token(),'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'});
+  function httpMsg(st,body){
+    if(st===401)return 'GitHub said 401: the token is invalid or expired. Create a new fine-grained token and paste it again.';
+    if(st===403)return /rate limit/i.test(body)?'GitHub rate limit reached. Wait a few minutes and try again.':'GitHub said 403: this token lacks access to '+OWNER+'/'+REPO+'. Give it Repository access → '+OWNER+'/'+REPO+' and Contents: Read and write.';
+    if(st===404)return 'GitHub said 404: the token can’t see '+OWNER+'/'+REPO+'/'+PATH+'. Fine-grained tokens return 404 for repos they weren’t given: set Resource owner = '+OWNER+', Only select repositories → '+OWNER+'/'+REPO+', Contents: Read and write.';
+    return 'GitHub error '+st+(body?': '+String(body).slice(0,140):'');
+  }
   async function fetchRemote(){ /* -> {json, sha} */
     const r=await fetch(API+'?ref='+BRANCH+'&t='+Date.now(),{headers:hdr(),cache:'no-store'});
-    if(r.status===404)return {json:null,sha:null};
-    if(!r.ok)throw Error('GitHub '+r.status+(r.status===401?' · token invalid/expired':r.status===403?' · token lacks access':''));
+    if(!r.ok)throw Error(httpMsg(r.status,await r.text().catch(()=>'')));
     const meta=await r.json();let text;
     if(meta.content&&meta.encoding==='base64')text=b64dec(meta.content);
-    else{const raw=await fetch(API+'?ref='+BRANCH,{headers:{...hdr(),Accept:'application/vnd.github.raw'},cache:'no-store'});if(!raw.ok)throw Error('GitHub raw '+raw.status);text=await raw.text();}
-    return {json:JSON.parse(text),sha:meta.sha};
+    else{const raw=await fetch(API+'?ref='+BRANCH,{headers:{...hdr(),Accept:'application/vnd.github.raw'},cache:'no-store'});if(!raw.ok)throw Error(httpMsg(raw.status,''));text=await raw.text();}
+    let json;try{json=JSON.parse(text);}catch(e){throw Error('board.json on GitHub is not valid JSON ('+e.message+')');}
+    return {json,sha:meta.sha};
   }
   function adopt(j){ /* write remote board into localStorage before the app reads it */
     if(!j||j.app!=='muse'||!j.state||!Array.isArray(j.state.cards))throw Error('board.json is not a Muse board');
-    origSet.call(localStorage,'muse.data',JSON.stringify(j.state));
+    try{origSet.call(localStorage,'muse.data',JSON.stringify(j.state));}catch(e){throw Error('This browser’s storage is full or blocked (private mode?), so the board can’t be stored. Free space or use a normal window.');}
     if(j.prefs){let s={};try{s=JSON.parse(get('muse.settings')||'{}')}catch{}const p={...j.prefs};delete p.apiKey;delete p.ytKey;origSet.call(localStorage,'muse.settings',JSON.stringify({...s,...p}));}
     {let v={};try{v=JSON.parse(get('muse.v2')||'{}')}catch{}let any=false;for(const k of ['tracker','inspo','planner','incidents','ideaWorkshop'])if(j[k]!==undefined){v[k]=j[k];any=true;}if(any)origSet.call(localStorage,'muse.v2',JSON.stringify(v));}
     if(j.drafts&&Object.keys(j.drafts).length)origSet.call(localStorage,'muse.disk.drafts',JSON.stringify(j.drafts));
@@ -41,21 +48,23 @@
     booted=true;
   /* Board data is never fetched from this site. With a token it comes from the PRIVATE repo
      via the GitHub API; without one the page starts empty and asks for the token. */
-  window.museBootRemote=async function(){
-    try{
-      const dirty=get(LS.dirty)==='1';
-      let j=null,sha=null,src='';
-      if(!token())return;
-      try{({json:j,sha}=await fetchRemote());src='GitHub';}catch(e){say('GitHub load failed ('+e.message+') · using this device’s copy');console.warn(e);}
-      if(!j)return;
-      const newer=!get('muse.data')||(j.exportedAt||'')!==(get(LS.at)||'');
-      if(!newer){if(sha)set(LS.sha,sha);return;}
-      if(!dirty){
-        if(sessionStorage.getItem('muse.gh.reloaded')===j.exportedAt)return; /* loop guard */
-        sessionStorage.setItem('muse.gh.reloaded',j.exportedAt||'');
-        adopt(j);if(sha)set(LS.sha,sha);location.reload();
-      }else say('⚠ This device has unsaved edits AND a newer copy exists on '+src+'. “Save to GitHub” keeps this device’s version (you’ll be asked to confirm); ⚙ → “Load from GitHub” discards local edits.');
-    }catch(e){console.warn('Remote check skipped',e);}
+  const localEmpty=()=>{try{const d=JSON.parse(get('muse.data')||'{}');return !(d.cards&&d.cards.length);}catch{return true;}};
+  function adoptAndReload(j,sha){adopt(j);if(sha)set(LS.sha,sha);
+    const n=(j.state.cards||[]).length;sessionStorage.setItem('muse.gh.flash','Loaded '+n+' idea'+(n===1?'':'s')+' from GitHub ✓');location.reload();}
+  /* explicit=true when the user just saved a token or tapped Reload: always report the outcome */
+  window.museBootRemote=async function(explicit){
+    if(!token()){if(explicit)msg('Paste your GitHub token first.','err');return false;}
+    const dirty=get(LS.dirty)==='1'&&!localEmpty();
+    let j,sha;
+    try{msg('Loading your board from GitHub…','busy');({json:j,sha}=await fetchRemote());}
+    catch(e){console.warn(e);msg(e.message,'err');if(!explicit)say('⚠ '+e.message);return false;}
+    const newer=localEmpty()||(j.exportedAt||'')!==(get(LS.at)||'');
+    if(!newer&&!explicit){if(sha)set(LS.sha,sha);msg('');return true;}
+    if(dirty&&!confirm('This device has changes not yet saved to GitHub.\n\nOK = replace them with the GitHub version.\nCancel = keep this device’s version (then tap “Save to GitHub”).')){msg('Kept this device’s version. Tap “Save to GitHub” to upload it.','ok');return false;}
+    if(!explicit&&sessionStorage.getItem('muse.gh.reloaded')===j.exportedAt){msg('');return false;}
+    sessionStorage.setItem('muse.gh.reloaded',j.exportedAt||'');
+    try{msg('Loaded '+(j.state?.cards||[]).length+' ideas · refreshing…','busy');adoptAndReload(j,sha);}catch(e){msg(e.message,'err');say('⚠ '+e.message);return false;}
+    return true;
   };
   function payload(){
     const st=typeof state!=='undefined'?state:JSON.parse(get('muse.data')||'{}');
@@ -79,22 +88,21 @@
         if(!force&&!confirm('GitHub has a newer board (saved from another device'+(remote.json?.exportedAt?' at '+new Date(remote.json.exportedAt).toLocaleString():'')+').\n\nOK = overwrite it with THIS device’s version.\nCancel = keep GitHub’s version (use ⚙ → Load from GitHub).')){set(LS.sha,remote.sha);throw Error('Not saved · newer version on GitHub');}
         r=await put(remote.sha);
       }
-      if(!r.ok){const e=await r.json().catch(()=>({}));throw Error('GitHub '+r.status+' '+(e.message||''));}
+      if(!r.ok){const e=await r.text().catch(()=>'');throw Error(r.status===404||r.status===403?httpMsg(r.status,e)+' (saving needs Contents: Read and write)':httpMsg(r.status,e));}
       const j=await r.json();set(LS.sha,j.content.sha);set(LS.at,p.exportedAt);set(LS.dirty,null);baseFp=fp(get('muse.data'));
       say('Saved to GitHub ✓');
-    }catch(e){say('⚠ '+e.message);console.warn(e);}
+    }catch(e){say('⚠ '+e.message);msg(e.message,'err');console.warn(e);}
     finally{busy=false;status();}
   };
-  window.museLoadFromGitHub=async function(){
-    if(!token())return say('Paste a GitHub token first');
-    if(get(LS.dirty)==='1'&&!confirm('Replace this device’s unsaved edits with the GitHub version?'))return;
-    try{const {json,sha}=await fetchRemote();if(!json)return say('No board on GitHub yet');adopt(json);set(LS.sha,sha);location.reload();}catch(e){say('⚠ '+e.message);}
-  };
+  window.museLoadFromGitHub=()=>window.museBootRemote(true);
+  let lastErr='';function msg(t,kind){lastErr=kind==='err'?t:(kind==='ok'||!t?'':lastErr);status();const el=document.getElementById('ghMsg');if(el){el.textContent=t||'';el.dataset.kind=kind||'';el.hidden=!t;el.setAttribute('role',kind==='err'?'alert':'status');}
+    document.querySelectorAll('#ghSaveCfg,#ghLoad').forEach(b=>{b.disabled=kind==='busy';b.setAttribute('aria-busy',kind==='busy'?'true':'false');});
+    if(t&&!document.getElementById('ghPanel')?.open&&kind!=='busy'&&typeof toast==='function')toast(t);}
   function say(m){if(typeof toast==='function')toast(m);else console.log(m);status();}
   function status(m){
     const el=document.getElementById('ghStatus');if(!el)return;const dirty=get(LS.dirty)==='1';
-    const narrow=matchMedia('(max-width:800px)').matches;el.textContent=m&&!narrow?m:(!token()?(narrow?'Local only':'Not syncing · saved on this device only'):dirty?(narrow?'Unsaved':'Unsaved changes'):(narrow?'Saved':'All changes saved'));if(m)el.title=m;
-    el.dataset.state=!token()?'off':dirty?'dirty':'ok';
+    const narrow=matchMedia('(max-width:800px)').matches;el.textContent=m&&!narrow?m:(lastErr&&token()?(narrow?'Sync error':'Sync error · open ⚙'):!token()?(narrow?'Local only':'Not syncing · saved on this device only'):dirty?(narrow?'Unsaved':'Unsaved changes'):(narrow?'Saved':'All changes saved'));if(m)el.title=m;
+    el.dataset.state=lastErr&&token()?'dirty':!token()?'off':dirty?'dirty':'ok';
     const b=document.getElementById('ghSaveBtn');if(b){b.classList.toggle('gh-dirty',dirty);b.setAttribute('aria-label',dirty?'Save to GitHub — unsaved changes':'Save to GitHub');}
   }
   function openPanel(){const d=document.getElementById('ghPanel');if(d&&!d.open){d._ret=document.activeElement;d.showModal();}}
@@ -158,6 +166,8 @@
 #ghPanel label{display:block;font-weight:600;font-size:14px;margin-top:10px}
 #ghPanel input{display:block;width:100%;box-sizing:border-box;min-height:44px;font-size:16px;margin:6px 0 2px;padding:8px 12px;border:1px solid #9aa3b2;border-radius:8px}
 #ghPanel .hint{font-weight:400;color:#4f5a6b;font-size:13px}
+#ghMsg{margin:14px 0 0;padding:10px 12px;border-radius:8px;font-size:14px;line-height:1.45;background:#eef3fb;color:#1f2f4d}#ghMsg[data-kind=err]{background:#fdecea;color:#7d1d10;border:1px solid #e3a59a}#ghMsg[data-kind=ok]{background:#e7f4ec;color:#1d4a33}#ghMsg[data-kind=busy]::before{content:"";display:inline-block;width:12px;height:12px;margin-right:8px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:ghspin .8s linear infinite;vertical-align:-1px}@keyframes ghspin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){#ghMsg[data-kind=busy]::before{animation:none}}
+#ghPanel button:disabled{opacity:.6;cursor:progress}
 #ghPanel .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:18px}
 #ghPanel .row button{min-height:44px;padding:0 16px;border-radius:8px;border:1px solid #9aa3b2;background:#fff;color:#1f2320;font:600 14px system-ui,sans-serif;cursor:pointer}
 #ghPanel .row .primary{background:var(--gh-green);border-color:var(--gh-green);color:#fff}
@@ -202,7 +212,7 @@
       const sbx=document.getElementById('sidebar');if(!narrow&&tb){if(bar.parentElement!==tb)tb.insertBefore(bar,note&&note.parentElement===tb?note:null);}else if(narrow&&sbx&&document.body.classList.contains('v2-on')){if(bar.parentElement!==sbx)sbx.insertBefore(bar,document.getElementById('v2More'));}else if(bar.parentElement!==document.body)document.body.append(bar);status();};window.museGhPlace=place;
     document.body.append(bar);place();matchMedia('(max-width:800px)').addEventListener('change',place);
     const d=document.createElement('dialog');d.id='ghPanel';d.setAttribute('aria-labelledby','ghPanelTitle');
-    d.innerHTML='<button class="x" type="button" id="ghX" aria-label="Close">✕</button><h2 id="ghPanelTitle">Sync & keys</h2><p>Your ideas live in your private repo <b>'+OWNER+'/'+REPO+'</b>. Keys are stored only in this browser and never committed.</p><label for="ghTok">GitHub token <span class="hint">· fine-grained, Contents: Read and write on '+OWNER+'/'+REPO+'</span></label><input id="ghTok" type="password" autocomplete="off" placeholder="github_pat_…"><label for="ghAnth">Anthropic API key <span class="hint">· optional, for Claude features</span></label><input id="ghAnth" type="password" autocomplete="off" placeholder="sk-ant-…"><label for="ghYt">YouTube Data API key <span class="hint">· optional, for view counts</span></label><input id="ghYt" type="password" autocomplete="off" placeholder="AIza…"><div class="row"><button id="ghSaveCfg" class="primary" type="button">Save</button><button id="ghLoad" type="button">Reload from GitHub</button><span class="spacer"></span><button id="ghForget" class="danger" type="button">Remove token</button></div>';
+    d.innerHTML='<button class="x" type="button" id="ghX" aria-label="Close">✕</button><h2 id="ghPanelTitle">Sync & keys</h2><p>Your ideas live in your private repo <b>'+OWNER+'/'+REPO+'</b>. Keys are stored only in this browser and never committed.</p><label for="ghTok">GitHub token <span class="hint">· fine-grained, Contents: Read and write on '+OWNER+'/'+REPO+'</span></label><input id="ghTok" type="password" autocomplete="off" placeholder="github_pat_…"><label for="ghAnth">Anthropic API key <span class="hint">· optional, for Claude features</span></label><input id="ghAnth" type="password" autocomplete="off" placeholder="sk-ant-…"><label for="ghYt">YouTube Data API key <span class="hint">· optional, for view counts</span></label><input id="ghYt" type="password" autocomplete="off" placeholder="AIza…"><p id="ghMsg" hidden></p><div class="row"><button id="ghSaveCfg" class="primary" type="button">Save</button><button id="ghLoad" type="button">Reload from GitHub</button><span class="spacer"></span><button id="ghForget" class="danger" type="button">Remove token</button></div>';
     document.body.append(d);
     const S=()=>{try{return JSON.parse(get('muse.settings')||'{}')}catch{return {}}};
     d.addEventListener('close',()=>{status();try{d._ret?.focus?.()}catch{}});
@@ -210,11 +220,14 @@
     document.getElementById('ghX').onclick=()=>d.close();
     document.getElementById('ghForget').onclick=()=>{if(!confirm('Remove the GitHub token from this browser? Your ideas stay on GitHub.'))return;set(LS.cfg,null);ghTok.value='';say('Token removed from this browser');};
     document.getElementById('ghLoad').onclick=()=>window.museLoadFromGitHub();
-    document.getElementById('ghSaveCfg').onclick=async()=>{
-      set(LS.cfg,JSON.stringify({token:ghTok.value.trim()}));
+    document.getElementById('ghSaveCfg').onclick=async e=>{
+      e.preventDefault();
+      const t=cleanTok(ghTok.value);ghTok.value=t;
       if(typeof settings!=='undefined'){settings.apiKey=ghAnth.value.trim();settings.ytKey=ghYt.value.trim();if(typeof saveSettings==='function')saveSettings();const a=document.getElementById('apiKey');if(a)a.value=settings.apiKey;const y=document.getElementById('ytKey');if(y)y.value=settings.ytKey;}
-      if(token()){try{const {sha}=await fetchRemote();if(sha&&!get(LS.sha))set(LS.sha,sha);say('GitHub connected ✓ · loading…');d.close();return window.museBootRemote();}catch(e){say('⚠ '+e.message);return;}}
-      d.close();
+      if(!t){set(LS.cfg,null);msg('Settings saved. No GitHub token, so this device isn’t syncing.','ok');status();return;}
+      if(!/^(github_pat_|ghp_|gho_|ghu_|ghs_)[A-Za-z0-9_]{20,}$/.test(t))return msg('That doesn’t look like a GitHub token. It should start with “github_pat_”. Copy it again from GitHub → Settings → Developer settings → Fine-grained tokens.','err');
+      set(LS.cfg,JSON.stringify({token:t}));status();
+      await window.museBootRemote(true);
     };
     document.getElementById('ghSaveBtn').onclick=()=>window.museSaveToGitHub();
     const fab=document.getElementById('ghFab');
@@ -224,6 +237,7 @@
     baseFp=get(LS.dirty)==='1'?'':fp(get('muse.data'));
     a11yFix();let q=null;new MutationObserver(()=>{if(q)return;q=requestAnimationFrame(()=>{q=null;a11yFix();});}).observe(document.body,{childList:true,subtree:true});
     status();
+    {const f=sessionStorage.getItem('muse.gh.flash');if(f){sessionStorage.removeItem('muse.gh.flash');setTimeout(()=>say(f),600);}}
     if(!token()){const n=document.createElement('p');n.id='ghSetup';n.style.cssText='background:#fff4dc;border:1px solid #c99a2e;border-radius:8px;padding:10px 12px;color:#3d2e05';n.innerHTML='<b>Connect your ideas:</b> paste your GitHub token below. Until then this device only shows what’s stored in this browser.';d.querySelector('h2').after(n);ghTok.value='';openPanel();say('Paste your GitHub token in Sync settings to load your ideas');}
     window.addEventListener('beforeunload',e=>{if(token()&&get(LS.dirty)==='1'){e.preventDefault();e.returnValue='';}});
   }
