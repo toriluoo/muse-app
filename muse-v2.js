@@ -242,7 +242,7 @@ function postDlg(pid){const p=(V.tracker.posts||[]).find(x=>x.id===pid);if(!p)re
   d.querySelector('[data-idea-go]')?.addEventListener('click',e=>{d.close();go('ideas');openIdea(e.target.dataset.ideaGo);});}
 
 /* ---------------- IDEAS ---------------- */
-const boards=()=>(state.boards||[]).filter(b=>b.type!=='pipeline'&&!/inspo/i.test(b.name||''));
+const boards=()=>(state.boards||[]).filter(b=>!/inspo/i.test(b.name||''));
 const ideaCards=()=>(state.cards||[]).filter(c=>boards().some(b=>b.id===c.boardId));
 const title=c=>{const raw=String(c.text||'').trim();let t=raw.split('\n').map(x=>x.trim()).find(x=>x&&!/^https?:\/\//.test(x));if(!t&&raw){try{const u=new URL(raw.split(/\s/)[0]);t=platformOfUrl(u.href)+' link · '+u.hostname.replace(/^www\./,'');}catch{t=raw;}}t=t||'Untitled idea';return t.length>90?t.slice(0,88)+'…':t;};
 const stages=()=>(state.stages&&state.stages.length?state.stages:[{id:'idea',name:'Idea'},{id:'scripting',name:'Scripting'},{id:'filming',name:'Filming'},{id:'editing',name:'Editing'},{id:'posted',name:'Posted'}]);
