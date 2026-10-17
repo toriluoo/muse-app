@@ -197,7 +197,15 @@ function dlg(title,body,onSave,saveLabel){const d=document.createElement('dialog
 
 /* ---------------- TRACKER ---------------- */
 const METRICS=[['views','Views'],['likes','Likes'],['comments','Comments'],['shares','Shares'],['saves','Saves'],['followersGained','Followers +']];
-function posts(){const s=sub.tracker;return (V.tracker.posts||[]).filter(p=>(s.acct==='all'||p.tracker===s.acct)&&(s.plat==='all'||p.platform===s.plat));}
+/* "upcoming" = a planned video that has no post yet (e.g. filming tomorrow). Its stage comes live from the linked pipeline card. */
+const isUp=p=>p&&p.status==='upcoming';
+const upStage=p=>{const c=p.ideaId&&(state.cards||[]).find(x=>x.id===p.ideaId);return c?(c.status||'idea'):(p.stage||'idea');};
+const upDate=p=>{const c=p.ideaId&&(state.cards||[]).find(x=>x.id===p.ideaId);return (c&&c.planDate)||p.plannedDate||'';};
+const upLabel=p=>stName(upStage(p))+(upDate(p)?' · '+fmtD(upDate(p)):'');
+const upPill=p=>'<span class="v2-pill s-'+E(upStage(p))+'">'+E(upLabel(p))+'</span>';
+const postPlats=p=>p.platforms&&p.platforms.length?p.platforms:[p.platform];
+const thumbImg=(th,label)=>'<img src="'+E(th)+'" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.parentNode.textContent=this.dataset.l" data-l="'+E(label)+'">';
+function posts(){const s=sub.tracker;return (V.tracker.posts||[]).filter(p=>(s.acct==='all'||p.tracker===s.acct)&&(s.plat==='all'||postPlats(p).includes(s.plat))&&!(isUp(p)&&upStage(p)==='posted'));}
 function rTracker(){const s=sub.tracker,all=V.tracker.posts||[],ps=posts();
   const acc=[['all','All']].concat((V.tracker.accounts||[]).map(a=>[a.id,a.name+(a.handle?' · '+a.handle:'')]));
   let h='<div class="v2h"><div><h2>Tracker</h2><p>How your posts are doing across NewWave and your personal account. Numbers are filled in automatically by the scraper.</p></div><span class="sp"></span>'+(V.tracker.updatedAt?'<span class="v2-pill">Updated '+E(fmtD(V.tracker.updatedAt))+'</span>':'')+'</div>';
@@ -206,11 +214,13 @@ function rTracker(){const s=sub.tracker,all=V.tracker.posts||[],ps=posts();
   h+='<div class="v2-seg" role="group" aria-label="View">'+[['gallery','Gallery'],['table','Table'],['charts','Charts']].map(([k,l])=>'<button type="button" data-view="'+k+'" aria-pressed="'+(s.view===k)+'">'+l+'</button>').join('')+'</div></div>';
   if(!all.length)h+='<div class="v2-empty"><h3>No posts tracked yet</h3><p>Once the scraper runs, your NewWave and @toriluoo posts on IG, X and LinkedIn show up here with views, likes, comments, shares, saves and followers gained.</p><p>Nothing to do right now.</p></div>';
   else if(!ps.length)h+='<div class="v2-empty"><h3>No posts match</h3><p>Try another account or platform.</p></div>';
-  else if(s.view==='gallery')h+='<div class="v2-grid">'+[...ps].sort((a,b)=>String(b.postedAt||'').localeCompare(String(a.postedAt||''))).map(p=>{const th=safeUrl(p.thumbnailUrl);return '<button type="button" class="v2-card" data-post="'+E(p.id)+'" style="'+platStyle(p.platform)+'"><div class="v2-thumb">'+(th?'<img src="'+E(th)+'" alt="" loading="lazy" referrerpolicy="no-referrer">':E(p.platform||'Post'))+'</div><h3>'+E(p.title||'Untitled post')+'</h3><div class="meta"><span class="v2-pill">'+E(p.platform||'?')+'</span><span>'+E(fmtD(p.postedAt))+'</span></div><div class="meta"><b style="color:#1f2320">'+fmtN(p.views)+'</b> views · '+fmtN(p.likes)+' likes</div></button>';}).join('')+'</div>';
+  else if(s.view==='gallery')h+='<div class="v2-grid">'+[...ps].sort((a,b)=>(isUp(b)-isUp(a))||String(b.postedAt||'').localeCompare(String(a.postedAt||''))).map(p=>{const th=safeUrl(p.thumbnailUrl);
+    if(isUp(p))return '<button type="button" class="v2-card" data-post="'+E(p.id)+'" style="--edge:'+stageColor(upStage(p))+'"><div class="v2-thumb" style="flex-direction:column;gap:8px">'+(th?thumbImg(th,upLabel(p)):upPill(p)+'<span>Not posted yet</span>')+'</div><h3>'+E(p.title||'Untitled video')+'</h3><div class="meta">'+upPill(p)+'</div><div class="meta">'+postPlats(p).map(x=>'<span class="v2-pill">'+E(x)+'</span>').join('')+'</div></button>';
+    return '<button type="button" class="v2-card" data-post="'+E(p.id)+'" style="'+platStyle(p.platform)+'"><div class="v2-thumb">'+(th?thumbImg(th,p.platform||'Post'):E(p.platform||'Post'))+'</div><h3>'+E(p.title||'Untitled post')+'</h3><div class="meta"><span class="v2-pill">'+E(p.platform||'?')+'</span><span>'+E(fmtD(p.postedAt))+'</span></div><div class="meta"><b style="color:#1f2320">'+fmtN(p.views)+'</b> views · '+fmtN(p.likes)+' likes</div></button>';}).join('')+'</div>';
   else if(s.view==='table'){const sorted=[...ps].sort((a,b)=>{const x=a[s.sort],y=b[s.sort];return (typeof x==='number'||typeof y==='number'?(Number(x)||0)-(Number(y)||0):String(x||'').localeCompare(String(y||'')))*s.dir;});
     const col=(k,l,n)=>'<th scope="col" class="'+(n?'n':'')+'" aria-sort="'+(s.sort===k?(s.dir>0?'ascending':'descending'):'none')+'"><button type="button" data-sort="'+k+'">'+l+(s.sort===k?(s.dir>0?' ▲':' ▼'):'')+'</button></th>';
-    h+='<div class="v2-table-wrap"><table class="v2-table"><caption class="sr-only">Tracked posts</caption><thead><tr>'+col('title','Post')+col('platform','Platform')+col('tracker','Account')+col('postedAt','Posted')+METRICS.map(([k,l])=>col(k,l,1)).join('')+col('lastUpdated','Updated')+'</tr></thead><tbody>'+sorted.map(p=>'<tr><td class="t"><a href="'+E(safeUrl(p.url)||'#')+'" target="_blank" rel="noopener">'+E(p.title||p.url||'Untitled')+'</a></td><td>'+E(p.platform)+'</td><td>'+E((V.tracker.accounts.find(a=>a.id===p.tracker)||{}).name||p.tracker)+'</td><td>'+E(fmtD(p.postedAt))+'</td>'+METRICS.map(([k])=>'<td class="n">'+fmtN(p[k])+'</td>').join('')+'<td>'+E(fmtD(p.lastUpdated))+'</td></tr>').join('')+'</tbody></table></div>';}
-  else h+=charts(ps);
+    h+='<div class="v2-table-wrap"><table class="v2-table"><caption class="sr-only">Tracked posts</caption><thead><tr>'+col('title','Post')+col('platform','Platform')+col('tracker','Account')+col('postedAt','Posted')+METRICS.map(([k,l])=>col(k,l,1)).join('')+col('lastUpdated','Updated')+'</tr></thead><tbody>'+sorted.map(p=>'<tr><td class="t">'+(isUp(p)?'<button type="button" class="v2-btn ghost" data-post="'+E(p.id)+'" style="padding:0;min-height:36px">'+E(p.title||'Untitled')+'</button>':'<a href="'+E(safeUrl(p.url)||'#')+'" target="_blank" rel="noopener">'+E(p.title||p.url||'Untitled')+'</a>')+'</td><td>'+E(postPlats(p).join(' · '))+'</td><td>'+E((V.tracker.accounts.find(a=>a.id===p.tracker)||{}).name||p.tracker)+'</td><td>'+(isUp(p)?upPill(p):E(fmtD(p.postedAt)))+'</td>'+METRICS.map(([k])=>'<td class="n">'+fmtN(p[k])+'</td>').join('')+'<td>'+E(fmtD(p.lastUpdated))+'</td></tr>').join('')+'</tbody></table></div>';}
+  else h+=charts(ps.filter(p=>!isUp(p)));
   root.innerHTML=h;
   root.onclick=e=>{const t=e.target.closest('button');if(!t)return;
     if(t.dataset.acct){s.acct=t.dataset.acct;rTracker();}else if(t.dataset.plat){s.plat=t.dataset.plat;rTracker();}else if(t.dataset.view){s.view=t.dataset.view;rTracker();}
@@ -226,6 +236,8 @@ function charts(ps){
   return '<div class="v2-charts"><section class="v2-panel"><h3>Views over time</h3>'+(pts.length>1?svg:'<p style="color:#525c6c">Needs at least two days of readings.</p>')+'</section><section class="v2-panel" style="--edge:#e6007e"><h3>Top posts by views</h3><ol class="v2-list">'+top.map(p=>'<li><div class="v2-row"><span class="grow" style="overflow-wrap:anywhere">'+E(p.title||'Untitled')+'</span><b>'+fmtN(p.views)+'</b></div><div style="height:6px;background:#eceef2;border-radius:3px"><div style="height:6px;border-radius:3px;background:linear-gradient(90deg,#e6007e,#e05a00);width:'+((p.views||0)/tmax*100).toFixed(1)+'%"></div></div></li>').join('')+'</ol></section></div>';
 }
 function postDlg(pid){const p=(V.tracker.posts||[]).find(x=>x.id===pid);if(!p)return;const idea=p.ideaId&&state.cards.find(c=>c.id===p.ideaId);
+  if(isUp(p)){const d=dlg(p.title||'Upcoming video','<p>'+upPill(p)+' '+postPlats(p).map(x=>'<span class="v2-pill">'+E(x)+'</span>').join(' ')+'</p><p style="color:#525c6c">Not posted yet. Stats appear here once the post is live and the tracker picks it up.</p>'+(safeUrl(p.docUrl)?'<p><a href="'+E(p.docUrl)+'" target="_blank" rel="noopener">Script (Google Doc) ↗</a></p>':'')+(idea?'<p>Pipeline card: <button type="button" class="v2-btn ghost" data-idea-go="'+E(idea.id)+'">'+E(title(idea))+'</button></p>':'')+'<label for="v2pn">Notes</label><textarea class="v2-in" id="v2pn" name="notes">'+E(p.notes||'')+'</textarea>',f=>{p.notes=f.notes;save();},'Save notes');
+    d.querySelector('[data-idea-go]')?.addEventListener('click',e=>{d.close();openIdea(e.target.dataset.ideaGo);});return;}
   const d=dlg(p.title||'Post','<p><span class="v2-pill">'+E(p.platform)+'</span> '+E(fmtD(p.postedAt))+' · <a href="'+E(safeUrl(p.url)||'#')+'" target="_blank" rel="noopener">Open post ↗</a></p><div class="v2-grid" style="grid-template-columns:repeat(3,1fr)">'+METRICS.map(([k,l])=>'<div class="v2-panel" style="padding:10px"><div style="font-size:12px;color:#525c6c">'+l+'</div><b style="font-size:18px">'+fmtN(p[k])+'</b></div>').join('')+'</div>'+(safeUrl(p.docUrl)?'<p><a href="'+E(p.docUrl)+'" target="_blank" rel="noopener">Google Doc draft ↗</a></p>':'')+(idea?'<p>Idea: <button type="button" class="v2-btn ghost" data-idea-go="'+E(idea.id)+'">'+E(title(idea))+'</button></p>':'')+'<label for="v2pn">Notes</label><textarea class="v2-in" id="v2pn" name="notes">'+E(p.notes||'')+'</textarea><p style="font-size:12px;color:#525c6c">Last updated '+E(fmtD(p.lastUpdated)||'—')+'</p>',f=>{p.notes=f.notes;save();},'Save notes');
   d.querySelector('[data-idea-go]')?.addEventListener('click',e=>{d.close();go('ideas');openIdea(e.target.dataset.ideaGo);});}
 
@@ -335,10 +347,11 @@ function rPlanner(){const s=sub.planner,items=(V.planner.items||[]).filter(i=>s.
   let h='<div class="v2h"><div><h2>Planner</h2><p>Your NewWave and Personal video plans, mirrored from Notion.</p></div><span class="sp"></span>'+(V.planner.syncedAt?'<span class="v2-pill">Synced '+E(fmtD(V.planner.syncedAt))+'</span>':'<span class="v2-pill pending">Notion sync not connected yet</span>')+'</div>';
   h+='<div class="v2-bar"><div class="v2-seg" role="group" aria-label="Planner">'+[['all','Both'],['newwave','NewWave'],['personal','Personal']].map(([k,l])=>'<button type="button" data-acct="'+k+'" aria-pressed="'+(s.acct===k)+'">'+l+'</button>').join('')+'</div><span style="flex:1"></span><div class="v2-seg" role="group" aria-label="View">'+[['week','Week'],['month','Month'],['list','List']].map(([k,l])=>'<button type="button" data-view="'+k+'" aria-pressed="'+(s.view===k)+'">'+l+'</button>').join('')+'</div></div>';
   if(!(V.planner.items||[]).length){h+='<div class="v2-empty"><h3>Nothing planned here yet</h3><p>When your two Notion planners are connected, every video (title, date, status, NewWave or Personal) appears here in a week, month or list view.</p><p>Until then, keep planning in Notion.</p></div>';root.innerHTML=h;bindP();return;}
-  const ev=i=>'<a class="v2-ev" style="--edge:'+(ACCT_C[i.tracker]||C.purple)+'" href="'+E(safeUrl(i.notionUrl)||'#')+'" target="_blank" rel="noopener"><b>'+E(i.title||'Untitled')+'</b><br><span style="color:#525c6c">'+E(i.status||'')+'</span></a>';
+  const pst=i=>i.localStatus||i.status||'',pend=i=>i.localStatus&&i.localStatus!==i.status?' title="Changed in Muse · Notion still says '+E(i.status||'—')+'"':'';
+  const ev=i=>'<a class="v2-ev" style="--edge:'+(ACCT_C[i.tracker]||C.purple)+'" href="'+E(safeUrl(i.notionUrl)||'#')+'" target="_blank" rel="noopener"'+pend(i)+'><b>'+E(i.title||'Untitled')+'</b><br><span style="color:#525c6c">'+E(pst(i))+(pend(i)?' ·  ↻':'')+'</span></a>';
   const key=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');const byDay={};items.forEach(i=>{const k=String(i.date||'').slice(0,10);(byDay[k]=byDay[k]||[]).push(i);});
   const today=key(new Date());
-  if(s.view==='list'){const sorted=[...items].sort((a,b)=>String(a.date||'9').localeCompare(String(b.date||'9')));h+='<ul class="v2-list">'+sorted.map(i=>'<li><div class="v2-row"><b style="min-width:90px">'+E(fmtD(i.date)||'No date')+'</b><span class="grow">'+E(i.title)+'</span><span class="v2-pill">'+E(i.status||'')+'</span><span class="v2-pill">'+E(i.tracker==='newwave'?'NewWave':'Personal')+'</span>'+(safeUrl(i.notionUrl)?'<a href="'+E(i.notionUrl)+'" target="_blank" rel="noopener">Notion ↗</a>':'')+(i.ideaId&&state.cards.some(c=>c.id===i.ideaId)?'<button type="button" class="v2-btn ghost" data-idea-go="'+E(i.ideaId)+'">Idea</button>':'')+'</div></li>').join('')+'</ul>';}
+  if(s.view==='list'){const sorted=[...items].sort((a,b)=>String(a.date||'9').localeCompare(String(b.date||'9')));h+='<ul class="v2-list">'+sorted.map(i=>'<li><div class="v2-row"><b style="min-width:90px">'+E(fmtD(i.date)||'No date')+'</b><span class="grow">'+E(i.title)+'</span><span class="v2-pill"'+pend(i)+'>'+E(pst(i))+(pend(i)?' ↻':'')+'</span><span class="v2-pill">'+E(i.tracker==='newwave'?'NewWave':'Personal')+'</span>'+(safeUrl(i.notionUrl)?'<a href="'+E(i.notionUrl)+'" target="_blank" rel="noopener">Notion ↗</a>':'')+(i.ideaId&&state.cards.some(c=>c.id===i.ideaId)?'<button type="button" class="v2-btn ghost" data-idea-go="'+E(i.ideaId)+'">Idea</button>':'')+'</div></li>').join('')+'</ul>';}
   else{let start=new Date(anchor),n=7;if(s.view==='week'){start.setDate(start.getDate()-((start.getDay()+6)%7));}else{start=new Date(anchor.getFullYear(),anchor.getMonth(),1);start.setDate(start.getDate()-((start.getDay()+6)%7));n=42;}
     const lbl=s.view==='week'?'Week of '+fmtD(start):anchor.toLocaleDateString(undefined,{month:'long',year:'numeric'});
     h+='<div class="v2-row" style="margin-bottom:10px"><button type="button" class="v2-btn" data-nav="-1" aria-label="Previous">←</button><b style="font:400 20px var(--serif)">'+E(lbl)+'</b><button type="button" class="v2-btn" data-nav="1" aria-label="Next">→</button><button type="button" class="v2-btn ghost" data-nav="0">Today</button></div><div class="v2-cal">';
@@ -350,6 +363,21 @@ function rPlanner(){const s=sub.planner,items=(V.planner.items||[]).filter(i=>s.
     else if(t.dataset.nav){const d=s.anchor?new Date(s.anchor):new Date();if(t.dataset.nav==='0')s.anchor=null;else{if(s.view==='week')d.setDate(d.getDate()+7*+t.dataset.nav);else d.setMonth(d.getMonth()+ +t.dataset.nav);s.anchor=d.toISOString();}rPlanner();}
     else if(t.dataset.ideaGo)openIdea(t.dataset.ideaGo);};}
 }
+
+/* ---------------- pipeline stage -> planner status (local) ----------------
+   When a card linked to a planner item (item.ideaId) changes stage anywhere in Muse, the item's status
+   follows on this device (item.localStatus). The daily refresh pushes it to Notion. */
+const STATUS_DEF={idea:'Queued',scripting:'Scripting',filming:'Filming',editing:'Editing',thumbnail:'Editing',mrjcopeuxw4swx:'Editing',posted:'Posted'};
+let lastStages=null;
+function stageSnap(){const m={};(state.cards||[]).forEach(c=>{m[c.id]=c.status||'idea';});return m;}
+function syncPlannerFromCards(){const now=stageSnap();if(!lastStages){lastStages=now;return;}
+  const map=Object.assign({},STATUS_DEF,V.planner.statusMap||{});let changed=false;
+  for(const cid in now){if(lastStages[cid]===now[cid])continue;
+    (V.planner.items||[]).filter(i=>i.ideaId===cid).forEach(i=>{const ns=map[now[cid]]||stName(now[cid]);if(pst0(i)===ns)return;
+      if(ns===i.status){delete i.localStatus;delete i.localStatusAt;}else{i.localStatus=ns;i.localStatusAt=new Date().toISOString();}changed=true;});}
+  lastStages=now;if(changed){save();if(tab==='planner')render();}}
+const pst0=i=>i.localStatus||i.status||'';
+window.museV2.syncPlanner=syncPlannerFromCards;
 
 /* ---------------- init ---------------- */
 function init(){if(root)return;if(typeof state==='undefined'||!document.getElementById('sidebar'))return;
@@ -370,6 +398,8 @@ function init(){if(root)return;if(typeof state==='undefined'||!document.getEleme
   /* clicking any classic nav leaves the v2 shell */
   $$('#workspaceNav button,#workspaceUtilities button').forEach(b=>b.addEventListener('click',leaveV2,true));
   window.addEventListener('storage',e=>{if(e.key===KEY){V=load();render();}});
+  syncPlannerFromCards();
+  if(typeof window.saveState==='function'&&!window.saveState._v2){const orig=window.saveState;window.saveState=function(){const r=orig.apply(this,arguments);try{syncPlannerFromCards();}catch(e){console.warn(e);}return r;};window.saveState._v2=1;}
   go(tab,{focus:false});
 }
 window.museV2Init=init;

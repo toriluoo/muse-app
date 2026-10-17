@@ -7,7 +7,8 @@
 (function(){
   const OWNER='toriluoo', REPO='muse', PATH='data/board.json', BRANCH='main';
   const API='https://api.github.com/repos/'+OWNER+'/'+REPO+'/contents/'+PATH;
-  const LS={cfg:'muse.gh',sha:'muse.gh.sha',dirty:'muse.gh.dirty',at:'muse.gh.remoteAt'};
+  const LS={cfg:'muse.gh',sha:'muse.gh.sha',dirty:'muse.gh.dirty',dirtyAt:'muse.gh.dirtyAt',at:'muse.gh.remoteAt',checked:'muse.gh.checkedAt'};
+  const V2KEYS=['tracker','inspo','planner','incidents','ideaWorkshop'];
   const get=k=>{try{return localStorage.getItem(k)}catch{return null}};
   const set=(k,v)=>{try{v==null?localStorage.removeItem(k):localStorage.setItem(k,v)}catch{}};
   const cfg=()=>{try{return JSON.parse(get(LS.cfg)||'{}')}catch{return {}}};
@@ -17,8 +18,13 @@
   let booted=false;const origSet=Storage.prototype.setItem;
   const fp=v=>{v=String(v||'').replace(/"activeBoard":"[^"]*",?/,'');let h=2166136261;for(let i=0;i<v.length;i++){h^=v.charCodeAt(i);h=Math.imul(h,16777619);}return (h>>>0).toString(36)+':'+v.length};
   let baseFp=null; /* fingerprint of the board as last loaded/saved; switching boards alone is not an edit */
-  Storage.prototype.setItem=function(k,v){origSet.call(this,k,v);if(booted&&this===window.localStorage&&k==='muse.v2'){origSet.call(this,LS.dirty,'1');status();}
-    if(booted&&this===window.localStorage&&k==='muse.data'&&baseFp!==null){const d=fp(v)!==baseFp;if(d)origSet.call(this,LS.dirty,'1');else this.removeItem(LS.dirty);status();}};
+  let baseV2=null; /* fingerprint of muse.v2 (canonical form) as last loaded/saved */
+  const canon=v=>{let o;try{o=JSON.parse(v||'{}')}catch{return String(v||'')}const sort=x=>Array.isArray(x)?x.map(sort):x&&typeof x==='object'?Object.keys(x).sort().reduce((a,k)=>(a[k]=sort(x[k]),a),{}):x;
+    const t={};for(const k of Object.keys(o||{}).sort()){const x=o[k];if(x==null||(Array.isArray(x)&&!x.length)||(typeof x==='object'&&!Array.isArray(x)&&!Object.keys(x).length))continue;t[k]=sort(x);}return JSON.stringify(t);};
+  const fpV2=v=>fp(canon(v));
+  const recheck=st=>{if(baseFp===null||baseV2===null)return;const d=fp(st.getItem('muse.data'))!==baseFp||fpV2(st.getItem('muse.v2'))!==baseV2;
+    if(d){if(st.getItem(LS.dirty)!=='1')origSet.call(st,LS.dirtyAt,String(Date.now()));origSet.call(st,LS.dirty,'1');}else{st.removeItem(LS.dirty);st.removeItem(LS.dirtyAt);}status();};
+  Storage.prototype.setItem=function(k,v){origSet.call(this,k,v);if(booted&&this===window.localStorage&&(k==='muse.v2'||k==='muse.data'))recheck(this);};
   const b64enc=s=>{const b=new TextEncoder().encode(s);let o='';for(let i=0;i<b.length;i+=0x8000)o+=String.fromCharCode.apply(null,b.subarray(i,i+0x8000));return btoa(o)};
   const b64dec=s=>new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\s/g,'')),c=>c.charCodeAt(0)));
   const hdr=()=>({'Authorization':'Bearer '+token(),'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'});
@@ -41,10 +47,13 @@
     if(!j||j.app!=='muse'||!j.state||!Array.isArray(j.state.cards))throw Error('board.json is not a Muse board');
     try{origSet.call(localStorage,'muse.data',JSON.stringify(j.state));}catch(e){throw Error('This browser’s storage is full or blocked (private mode?), so the board can’t be stored. Free space or use a normal window.');}
     if(j.prefs){let s={};try{s=JSON.parse(get('muse.settings')||'{}')}catch{}const p={...j.prefs};delete p.apiKey;delete p.ytKey;origSet.call(localStorage,'muse.settings',JSON.stringify({...s,...p}));}
-    {let v={};try{v=JSON.parse(get('muse.v2')||'{}')}catch{}let any=false;for(const k of ['tracker','inspo','planner','incidents','ideaWorkshop'])if(j[k]!==undefined){v[k]=j[k];any=true;}if(any)origSet.call(localStorage,'muse.v2',JSON.stringify(v));}
+    adoptV2(j);
     if(j.drafts&&Object.keys(j.drafts).length)origSet.call(localStorage,'muse.disk.drafts',JSON.stringify(j.drafts));
-    set(LS.at,j.exportedAt||'');set(LS.dirty,null);
+    set(LS.at,j.exportedAt||'');set(LS.dirty,null);set(LS.dirtyAt,null);
   }
+  /* copy the v2 tab data (tracker, planner, inspo, …) from board.json into localStorage muse.v2 */
+  function adoptV2(j){let v={};try{v=JSON.parse(get('muse.v2')||'{}')}catch{}let any=false;for(const k of V2KEYS)if(j[k]!==undefined&&JSON.stringify(v[k])!==JSON.stringify(j[k])){v[k]=j[k];any=true;}
+    if(any){const s=JSON.stringify(v);origSet.call(localStorage,'muse.v2',s);baseV2=fpV2(s);}return any;}
     booted=true;
   /* Board data is never fetched from this site. With a token it comes from the PRIVATE repo
      via the GitHub API; without one the page starts empty and asks for the token. */
@@ -58,11 +67,19 @@
     let j,sha;
     try{msg('Loading your board from GitHub…','busy');({json:j,sha}=await fetchRemote());}
     catch(e){console.warn(e);msg(e.message,'err');if(!explicit)say('⚠ '+e.message);return false;}
-    const newer=localEmpty()||(j.exportedAt||'')!==(get(LS.at)||'');
-    if(!newer&&!explicit){if(sha)set(LS.sha,sha);msg('');return true;}
-    if(dirty&&!confirm('This device has changes not yet saved to GitHub.\n\nOK = replace them with the GitHub version.\nCancel = keep this device’s version (then tap “Save to GitHub”).')){msg('Kept this device’s version. Tap “Save to GitHub” to upload it.','ok');return false;}
-    if(!explicit&&sessionStorage.getItem('muse.gh.reloaded')===j.exportedAt){msg('');return false;}
-    sessionStorage.setItem('muse.gh.reloaded',j.exportedAt||'');
+    set(LS.checked,String(Date.now()));
+    /* "newer" = GitHub's file changed since this device last loaded/saved it (sha), or its exportedAt moved */
+    const knownSha=get(LS.sha);
+    const newer=localEmpty()||(!!sha&&!!knownSha&&sha!==knownSha)||(j.exportedAt||'')!==(get(LS.at)||'');
+    if(!newer&&!explicit){if(sha)set(LS.sha,sha);
+      /* same board, but this browser may be missing tracker/planner data saved by another device or the daily refresh */
+      if(!dirty&&adoptV2(j)){try{window.museV2&&window.museV2.reload();}catch(e){console.warn(e);}}
+      msg('');return true;}
+    if(dirty){const at=+get(LS.dirtyAt)||0,when=t=>t?new Date(t).toLocaleString():'';
+      if(!confirm('This device has changes not yet saved to GitHub'+(at?' (since '+when(at)+')':'')+(j.exportedAt?', and GitHub has a newer version ('+when(j.exportedAt)+')':'')+'.\n\nOK = replace them with the GitHub version.\nCancel = keep this device’s version (then tap “Save to GitHub”).')){msg('Kept this device’s version. Tap “Save to GitHub” to upload it.','ok');return false;}}
+    const rk=(sha||'')+'|'+(j.exportedAt||'');
+    if(!explicit&&sessionStorage.getItem('muse.gh.reloaded')===rk){msg('');return false;}
+    sessionStorage.setItem('muse.gh.reloaded',rk);
     try{msg('Loaded '+(j.state?.cards||[]).length+' ideas · refreshing…','busy');adoptAndReload(j,sha);}catch(e){msg(e.message,'err');say('⚠ '+e.message);return false;}
     return true;
   };
@@ -89,7 +106,7 @@
         r=await put(remote.sha);
       }
       if(!r.ok){const e=await r.text().catch(()=>'');throw Error(r.status===404||r.status===403?httpMsg(r.status,e)+' (saving needs Contents: Read and write)':httpMsg(r.status,e));}
-      const j=await r.json();set(LS.sha,j.content.sha);set(LS.at,p.exportedAt);set(LS.dirty,null);baseFp=fp(get('muse.data'));
+      const j=await r.json();set(LS.sha,j.content.sha);set(LS.at,p.exportedAt);set(LS.dirty,null);set(LS.dirtyAt,null);baseFp=fp(get('muse.data'));baseV2=fpV2(get('muse.v2'));
       say('Saved to GitHub ✓');
     }catch(e){say('⚠ '+e.message);msg(e.message,'err');console.warn(e);}
     finally{busy=false;status();}
@@ -234,7 +251,9 @@
     fab.onclick=()=>{document.body.classList.add('gh-capturing');if(typeof museBeginCapture==='function')museBeginCapture();setTimeout(()=>{const i=document.getElementById('captureInput');if(i){i.focus();}},50);};
     /* hide the mobile capture sheet again once it's empty and focus leaves it */
     document.addEventListener('focusout',()=>setTimeout(()=>{const c=document.getElementById('capture'),i=document.getElementById('captureInput');if(c&&!c.contains(document.activeElement)&&!(i&&i.value.trim()))document.body.classList.remove('gh-capturing');},150));
-    baseFp=get(LS.dirty)==='1'?'':fp(get('muse.data'));
+    baseFp=get(LS.dirty)==='1'?'':fp(get('muse.data'));baseV2=get(LS.dirty)==='1'?'':fpV2(get('muse.v2'));
+    /* coming back to the tab/app after a while: check GitHub again so the board is never stale */
+    document.addEventListener('visibilitychange',()=>{if(document.visibilityState!=='visible'||!token())return;const last=+get(LS.checked)||0;if(Date.now()-last>10*60*1000)window.museBootRemote(false);});
     a11yFix();let q=null;new MutationObserver(()=>{if(q)return;q=requestAnimationFrame(()=>{q=null;a11yFix();});}).observe(document.body,{childList:true,subtree:true});
     status();
     {const f=sessionStorage.getItem('muse.gh.flash');if(f){sessionStorage.removeItem('muse.gh.flash');setTimeout(()=>say(f),600);}}
