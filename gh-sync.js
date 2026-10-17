@@ -54,6 +54,27 @@
   /* copy the v2 tab data (tracker, planner, inspo, …) from board.json into localStorage muse.v2 */
   function adoptV2(j){let v={};try{v=JSON.parse(get('muse.v2')||'{}')}catch{}let any=false;for(const k of V2KEYS)if(j[k]!==undefined&&JSON.stringify(v[k])!==JSON.stringify(j[k])){v[k]=j[k];any=true;}
     if(any){const s=JSON.stringify(v);origSet.call(localStorage,'muse.v2',s);baseV2=fpV2(s);}return any;}
+  /* ---- merge rules ----
+     tracker + planner are written by the daily refresh (scraper-owned): GitHub's copy ALWAYS wins on load,
+     keeping only what you add on top (post notes, idea links, a planner status changed in Muse not yet in Notion).
+     Everything else (cards, ideas, workshop, inspo, stories) goes through keep-or-replace. */
+  const readV2=()=>{try{return JSON.parse(get('muse.v2')||'{}')||{}}catch{return {}}};
+  function mergeScraper(v,j){let ch=false;
+    if(j.tracker&&Array.isArray(j.tracker.posts)){const loc=v.tracker||{},lp={};(loc.posts||[]).forEach(p=>{lp[p.id]=p;});
+      const posts=j.tracker.posts.map(p=>{const l=lp[p.id];if(!l)return p;const o={...p};if(l.notes)o.notes=l.notes;if(l.ideaId&&!o.ideaId)o.ideaId=l.ideaId;if(l.docUrl&&!o.docUrl)o.docUrl=l.docUrl;return o;});
+      const ids=new Set(posts.map(p=>p.id));(loc.posts||[]).forEach(p=>{if(!ids.has(p.id)&&p.manual)posts.push(p);});
+      const t={...loc,...j.tracker,posts};if(JSON.stringify(t)!==JSON.stringify(loc)){v.tracker=t;ch=true;}}
+    if(j.planner&&Array.isArray(j.planner.items)){const loc=v.planner||{},li={};(loc.items||[]).forEach(i=>{li[i.id]=i;});
+      const items=j.planner.items.map(i=>{const l=li[i.id];let o=i;if(l&&l.localStatus&&l.localStatus!==i.status&&!i.localStatus)o={...i,localStatus:l.localStatus,localStatusAt:l.localStatusAt};if(l&&l.ideaId&&!o.ideaId)o={...o,ideaId:l.ideaId};return o;});
+      const t={...loc,...j.planner,items};if(JSON.stringify(t)!==JSON.stringify(loc)){v.planner=t;ch=true;}}
+    return ch;}
+  function applyScraper(j,clean){const v=readV2();if(!mergeScraper(v,j))return false;const s=JSON.stringify(v);origSet.call(localStorage,'muse.v2',s);if(clean)baseV2=fpV2(s);
+    try{window.museV2&&window.museV2.reload();}catch(e){console.warn(e);}return true;}
+  /* cards created on another device / by an agent after this device last synced, and missing here */
+  function newRemoteCards(j){if(typeof state==='undefined'||!Array.isArray(state.cards))return [];const since=Date.parse(get(LS.at)||'')||0,have=new Set(state.cards.map(c=>c.id));
+    return (j.state&&j.state.cards||[]).filter(c=>c&&c.id&&!have.has(c.id)&&(c.createdAt||0)>since);}
+  function mergeCards(j,add){if(!add.length)return 0;const hb=new Set((state.boards||[]).map(b=>b.id));(j.state.boards||[]).forEach(b=>{if(!hb.has(b.id)&&add.some(c=>c.boardId===b.id))state.boards.push(b);});
+    state.cards.push(...add);try{saveState();}catch(e){console.warn(e);}try{typeof renderAll==='function'&&renderAll();}catch(e){console.warn(e);}try{window.museV2&&window.museV2.reload();}catch(e){}return add.length;}
     booted=true;
   /* Board data is never fetched from this site. With a token it comes from the PRIVATE repo
      via the GitHub API; without one the page starts empty and asks for the token. */
@@ -71,12 +92,18 @@
     /* "newer" = GitHub's file changed since this device last loaded/saved it (sha), or its exportedAt moved */
     const knownSha=get(LS.sha);
     const newer=localEmpty()||(!!sha&&!!knownSha&&sha!==knownSha)||(j.exportedAt||'')!==(get(LS.at)||'');
+    /* tracker + planner: GitHub always wins, whatever the local state (never blocked by the prompt below) */
+    applyScraper(j,!dirty);
     if(!newer&&!explicit){if(sha)set(LS.sha,sha);
-      /* same board, but this browser may be missing tracker/planner data saved by another device or the daily refresh */
+      /* same board, but this browser may be missing other v2 data saved by another device */
       if(!dirty&&adoptV2(j)){try{window.museV2&&window.museV2.reload();}catch(e){console.warn(e);}}
       msg('');return true;}
-    if(dirty){const at=+get(LS.dirtyAt)||0,when=t=>t?new Date(t).toLocaleString():'';
-      if(!confirm('This device has changes not yet saved to GitHub'+(at?' (since '+when(at)+')':'')+(j.exportedAt?', and GitHub has a newer version ('+when(j.exportedAt)+')':'')+'.\n\nOK = replace them with the GitHub version.\nCancel = keep this device’s version (then tap “Save to GitHub”).')){msg('Kept this device’s version. Tap “Save to GitHub” to upload it.','ok');return false;}}
+    if(dirty){const at=+get(LS.dirtyAt)||0,when=t=>t?new Date(t).toLocaleString():'',add=newRemoteCards(j);
+      const q='GitHub has a newer version of your board'+(j.exportedAt?' (saved '+when(j.exportedAt)+')':'')+'.\n\nThis device also has edits that were never saved to GitHub'+(at?' (since '+when(at)+')':'')+'.\n(Tracker and Planner are already up to date either way.)\n\n'+
+        'OK = Use the GitHub version (recommended). Edits made only on this device are dropped.\n\n'+
+        'Cancel = Keep this device’s edits'+(add.length?' and add the '+add.length+' new idea'+(add.length>1?'s':'')+' from GitHub':'')+'. Then tap “Save to GitHub”.';
+      if(!confirm(q)){const n=mergeCards(j,add);if(sha)set(LS.sha,sha);set(LS.at,j.exportedAt||'');
+        msg('Kept this device’s edits'+(n?' and added '+n+' new idea'+(n>1?'s':'')+' from GitHub':'')+'. Tap “Save to GitHub” to upload.','ok');return false;}}
     const rk=(sha||'')+'|'+(j.exportedAt||'');
     if(!explicit&&sessionStorage.getItem('muse.gh.reloaded')===rk){msg('');return false;}
     sessionStorage.setItem('muse.gh.reloaded',rk);
@@ -103,7 +130,9 @@
       if(r.status===409||r.status===422){ /* sha mismatch: someone (other device) saved since we loaded */
         const remote=await fetchRemote();
         if(!force&&!confirm('GitHub has a newer board (saved from another device'+(remote.json?.exportedAt?' at '+new Date(remote.json.exportedAt).toLocaleString():'')+').\n\nOK = overwrite it with THIS device’s version.\nCancel = keep GitHub’s version (use ⚙ → Load from GitHub).')){set(LS.sha,remote.sha);throw Error('Not saved · newer version on GitHub');}
-        r=await put(remote.sha);
+        /* overwrite, but never lose scraper data or ideas added elsewhere since this device loaded */
+        {const v=readV2();if(mergeScraper(v,remote.json))origSet.call(localStorage,'muse.v2',JSON.stringify(v));mergeCards(remote.json,newRemoteCards(remote.json));
+          const p2=payload();p.exportedAt=p2.exportedAt;r=await fetch(API,{method:'PUT',headers:{...hdr(),'Content-Type':'application/json'},body:JSON.stringify({message:'Muse: update board ('+(navigator.userAgent.match(/iPhone|iPad|Android/)?.[0]||'desktop')+')',content:b64enc(JSON.stringify(p2)),branch:BRANCH,sha:remote.sha})});}
       }
       if(!r.ok){const e=await r.text().catch(()=>'');throw Error(r.status===404||r.status===403?httpMsg(r.status,e)+' (saving needs Contents: Read and write)':httpMsg(r.status,e));}
       const j=await r.json();set(LS.sha,j.content.sha);set(LS.at,p.exportedAt);set(LS.dirty,null);set(LS.dirtyAt,null);baseFp=fp(get('muse.data'));baseV2=fpV2(get('muse.v2'));
